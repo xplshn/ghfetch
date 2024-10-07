@@ -1,25 +1,3 @@
-// Package cmd is a root command.
-/*
-Copyright © 2023 Takafumi Miyanaga <miya.org.0309@gmail.com>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-*/
 package cmd
 
 import (
@@ -53,10 +31,24 @@ type gitHubUser struct {
 	TotalIssues          int    `json:"total_issues"`
 }
 
+type RepoInfo struct {
+	Author         string   `json:"owner.login"`
+	Description    string   `json:"description"`
+	Language       string   `json:"language"`
+	License        string   `json:"license.name"`
+	LastUpdated    string   `json:"updated_at"`
+	Version        string   `json:"latest_release.tag_name"`
+	Released       string   `json:"latest_release.published_at"`
+	OwnerAvatar    string   `json:"owner.avatar_url"`
+	Stars          int      `json:"stargazers_count"`
+	Topics         []string `json:"topics"`
+}
+
 var (
 	username       string
 	highlightColor string
 	accessToken    string
+	repoURL        string
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -64,6 +56,12 @@ var rootCmd = &cobra.Command{
 	Use:   "ghfetch",
 	Short: "Fetch GitHub user's profile, just like neofetch",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if accessToken == "" {
+			accessToken = os.Getenv("GH_TOKEN")
+			if accessToken == "" {
+				accessToken = os.Getenv("GITHUB_TOKEN")
+			}
+		}
 		if accessToken == "" {
 			return errors.New("access token environment variable is not set")
 		}
@@ -82,24 +80,38 @@ var rootCmd = &cobra.Command{
 		}
 		newWidth := int(float64(defaultWidth) * scaleFactor)
 
-		if username == "" {
-			return errors.New("please provide a github username using the --user flag")
+		if username == "" && repoURL == "" {
+			return errors.New("please provide a github username using the --user flag or a repository URL using the --repo flag")
 		}
 		flags := aic_package.DefaultFlags()
 		flags.Dimensions = []int{newWidth, int(float64(defaultHeight) * scaleFactor)}
 		flags.Colored = true
 		flags.CustomMap = " .-=+#@"
-		asciiArt, err := aic_package.Convert(fmt.Sprintf("https://github.com/%s.png", username), flags)
+
+		var asciiArt string
+		var err error
+		if username != "" {
+			asciiArt, err = aic_package.Convert(fmt.Sprintf("https://github.com/%s.png", username), flags)
+		} else if repoURL != "" {
+			repoInfo, err := fetchRepoInfo(repoURL, accessToken)
+			if err != nil {
+				return errors.New("error fetching repository information")
+			}
+			asciiArt, err = aic_package.Convert(repoInfo.OwnerAvatar, flags) // Fetch author's image
+		}
 		if err != nil {
 			return err
 		}
 		leftPane := lipgloss.NewStyle().Width(newWidth).Render(asciiArt)
 
-		user, err := fetchUserWithGraphQL(username, accessToken)
-		s.Stop()
-		if err != nil {
-			return errors.New("error fetching user information")
+		var user *gitHubUser
+		if username != "" {
+			user, err = fetchUserWithGraphQL(username, accessToken)
+			if err != nil {
+				return errors.New("error fetching user information")
+			}
 		}
+		s.Stop()
 
 		titleColor := colorMap[highlightColor].SprintFunc()
 		User := titleColor("User")
@@ -107,22 +119,57 @@ var rootCmd = &cobra.Command{
 		Repos := titleColor("Repos")
 		Followers := titleColor("Followers")
 		Following := titleColor("Following")
-		TotalStarsEarned := titleColor("Total Stars Earnd")
-		TotalCommitsThisYear := titleColor("Total Commit This Year")
+		TotalStarsEarned := titleColor("Total Stars Earned")
+		TotalCommitsThisYear := titleColor("Total Commits This Year")
 		TotalPRs := titleColor("Total PRs")
 		TotalIssues := titleColor("Total Issues")
 
-		userInfoPane := []string{
-			fmt.Sprintf("  %s: %s", User, username),
-			separator(username),
-			fmt.Sprintf("  %s: %s", Name, user.Name),
-			fmt.Sprintf("  %s: %d", Repos, user.Repos),
-			fmt.Sprintf("  %s: %d", Followers, user.Followers),
-			fmt.Sprintf("  %s: %d", Following, user.Following),
-			fmt.Sprintf("  %s: %d", TotalStarsEarned, user.TotalStarsEarned),
-			fmt.Sprintf("  %s: %d", TotalCommitsThisYear, user.TotalCommitsThisYear),
-			fmt.Sprintf("  %s: %d", TotalPRs, user.TotalPRs),
-			fmt.Sprintf("  %s: %d", TotalIssues, user.TotalIssues),
+		userInfoPane := []string{}
+		if username != "" {
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %s", User, username))
+			userInfoPane = append(userInfoPane, separator(username))
+			if user.Name != "" {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %s", Name, user.Name))
+			}
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", Repos, user.Repos))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", Followers, user.Followers))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", Following, user.Following))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", TotalStarsEarned, user.TotalStarsEarned))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", TotalCommitsThisYear, user.TotalCommitsThisYear))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", TotalPRs, user.TotalPRs))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  %s: %d", TotalIssues, user.TotalIssues))
+		}
+
+		if repoURL != "" {
+			repoInfo, err := fetchRepoInfo(repoURL, accessToken)
+			if err != nil {
+				return errors.New("error fetching repository information")
+			}
+			if username != "" {
+				userInfoPane = append(userInfoPane, separator(username))
+			}
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  Repo URL: %s", repoURL))
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  Author: %s", repoInfo.Author))
+			if repoInfo.Description != "" {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  Description: %s", repoInfo.Description))
+			}
+			if repoInfo.Language != "" {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  Language: %s", repoInfo.Language))
+			}
+			if repoInfo.License != "" {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  License: %s", repoInfo.License))
+			}
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  Last Updated: %s", repoInfo.LastUpdated))
+			if repoInfo.Version != "" {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  Version: %s", repoInfo.Version))
+			}
+			if repoInfo.Released != "" {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  Released: %s", repoInfo.Released))
+			}
+			userInfoPane = append(userInfoPane, fmt.Sprintf("  Stars: %d", repoInfo.Stars))
+			if len(repoInfo.Topics) > 0 {
+				userInfoPane = append(userInfoPane, fmt.Sprintf("  Topics: %v", repoInfo.Topics))
+			}
 		}
 
 		userInfoPane = append(userInfoPane, separator(username))
@@ -148,8 +195,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&username, "user", "u", "", "GitHub username")
 	rootCmd.Flags().StringVarP(&highlightColor, "color", "c", "blue", "Highlight color red, green, yellow, blue, magenta, cyan")
 	rootCmd.Flags().StringVar(&accessToken, "access-token", "", "Your GitHub access token")
-	_ = rootCmd.MarkPersistentFlagRequired("user")
-	_ = rootCmd.MarkPersistentFlagRequired("access-token")
+	rootCmd.Flags().StringVar(&repoURL, "repo", "", "Repository URL")
 }
 
 var colorMap = map[string]*color.Color{
@@ -303,6 +349,30 @@ func fetchUserWithGraphQL(username, accessToken string) (*gitHubUser, error) {
 	}
 
 	return user, nil
+}
+
+func fetchRepoInfo(repoURL, accessToken string) (*RepoInfo, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s", strings.TrimPrefix(repoURL, "https://github.com/"))
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var repoInfo RepoInfo
+	err = json.NewDecoder(resp.Body).Decode(&repoInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	return &repoInfo, nil
 }
 
 var result struct {
